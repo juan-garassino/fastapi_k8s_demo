@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: ["main"]
 
+# Add this permissions block at the workflow level (not just job level)
+permissions:
+  contents: read
+  packages: write
+  id-token: write  # Required for GitHub OIDC token authentication
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -22,17 +28,17 @@ jobs:
   build-and-push:
     needs: test
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
-      - name: Log in to GitHub Container Registry
+      
+      # Modern authentication using OIDC
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }}  # This is automatically provided
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
@@ -49,12 +55,12 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # FIXED: Added write permission
+      contents: write  # Needed for pushing changes
     steps:
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}  # FIXED: Explicit token for write access
-          fetch-depth: 0  # FIXED: Get full history for pushing
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0  # Needed for git push
       - name: Update image in Kubernetes manifest
         run: |
           sed -i "s|REPLACE_OWNER|${{ github.repository_owner }}|g" kubernetes/deployment.yaml
