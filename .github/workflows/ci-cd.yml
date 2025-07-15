@@ -61,9 +61,11 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0  # Needed for git push
+      
       - name: Update image in Kubernetes manifest
         run: |
           sed -i "s|REPLACE_OWNER|${{ github.repository_owner }}|g" kubernetes/deployment.yaml
+      
       - name: Commit updated manifests
         run: |
           git config user.name "GitHub Actions"
