@@ -9,10 +9,10 @@ __pycache__/
 venv/
 
 # Kubernetes
-kubeconfig.yaml
+# kubeconfig.yaml
 
 # Docker
-Dockerfile
+# Dockerfile
 .dockerignore
 
 # IDE
