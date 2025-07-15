@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: fastapi-app
-        image: ghcr.io/REPLACE_OWNER/fastapi-demo:latest
+        image: ghcr.io/juan-garassino/fastapi-demo:latest
         ports:
         - containerPort: 8000
         livenessProbe:
