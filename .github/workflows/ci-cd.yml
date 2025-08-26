@@ -6,6 +6,7 @@ on:
   pull_request:
     branches: ["main"]
 
+# Set permissions at the workflow level
 permissions:
   contents: read
   packages: write
@@ -27,13 +28,14 @@ jobs:
   build-and-push:
     needs: test
     runs-on: ubuntu-latest
+    # Explicitly set permissions for this job
     permissions:
+      contents: read
       packages: write
       id-token: write
     steps:
       - uses: actions/checkout@v4
       
-      # Use GITHUB_TOKEN instead
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
