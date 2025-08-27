@@ -13,3 +13,5 @@ def read_item(item_id: int, q: str = None):
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
+
+print('DONE')

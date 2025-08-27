@@ -13,5 +13,5 @@ COPY src/ /app/src/
 # Expose port
 EXPOSE 8000
 
-# Run the app
+# Run the app # 8080
 CMD ["uvicorn", "src.app.main:app", "--host", "0.0.0.0", "--port", "8000"]

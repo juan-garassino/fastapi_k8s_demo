@@ -1,0 +1,122 @@
+# .github/workflows/ci-cd.yml
+name: FastAPI CI/CD Pipeline
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write   # Needed for Google OIDC auth
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest httpx black flake8 mypy bandit
+
+      - name: Run unit & integration tests
+        run: pytest -q --disable-warnings -ra
+
+      - name: Run linting & type checks
+        run: |
+          black --check .
+          flake8 .
+          mypy .
+          bandit -r app/
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Authenticate with Google Cloud using OIDC (no long-lived keys)
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Configure Docker for GAR
+        run: gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            europe-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/fastapi-repo/fastapi-demo:${{ github.sha }}
+            europe-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/fastapi-repo/fastapi-demo:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Scan Docker image for vulnerabilities
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: europe-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/fastapi-repo/fastapi-demo:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy fastapi-demo \
+            --image=europe-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/fastapi-repo/fastapi-demo:${{ github.sha }} \
+            --region=europe-west1 \
+            --platform=managed \
+            --allow-unauthenticated \
+            --update-env-vars=COMMIT_SHA=${{ github.sha }}
+
+      - name: Smoke test new deployment
+        run: |
+          SERVICE_URL=$(gcloud run services describe fastapi-demo \
+            --region=europe-west1 --format='value(status.url)')
+          echo "Testing service at $SERVICE_URL"
+          sleep 10  # wait for traffic to switch
+          curl -f "$SERVICE_URL/healthz" || (echo "Smoke test failed, rolling back..." && exit 1)
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          PREV_REV=$(gcloud run revisions list \
+            --service fastapi-demo \
+            --region=europe-west1 \
+            --sort-by="~createTime" \
+            --format="value(metadata.name)" | sed -n 2p)
+          echo "Rolling back to $PREV_REV"
+          gcloud run services update-traffic fastapi-demo \
+            --region=europe-west1 \
+            --to-revisions $PREV_REV=100
