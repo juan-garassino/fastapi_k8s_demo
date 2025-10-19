@@ -1,3 +1,4 @@
+# .github/workflows/ci-cd.yml
 name: FastAPI CI/CD Pipeline
 
 on:
@@ -6,13 +7,13 @@ on:
   pull_request:
     branches: ["main"]
 
-# Add this permissions block at the workflow level (not just job level)
 permissions:
   contents: read
   packages: write
-  id-token: write  # Required for GitHub OIDC token authentication
+  id-token: write   # Needed for Google OIDC auth
 
 jobs:
+  # 🧪 1. Run Tests
   test:
     runs-on: ubuntu-latest
     steps:
@@ -21,23 +22,32 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: pip install pytest fastapi uvicorn httpx
+        run: pip install -r requirements.txt pytest httpx black flake8 mypy bandit
       - name: Run tests
-        run: pytest tests/
+        run: |
+          export PYTHONPATH=$PYTHONPATH:$(pwd)/src
+          pytest -q --disable-warnings -ra
 
+  # 🧱 2. Build and Push to Google Artifact Registry
   build-and-push:
     needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      # Modern authentication using OIDC
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+
+      - name: Authenticate with Google Cloud using OIDC
+        uses: google-github-actions/auth@v2
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN }}  # This is automatically provided
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Configure Docker for GAR
+        run: gcloud auth configure-docker europe-west1-docker.pkg.dev --quiet
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -45,31 +55,48 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/fastapi-demo:latest
-            ghcr.io/${{ github.repository_owner }}/fastapi-demo:${{ github.sha }}
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            europe-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/fastapi-repo/fastapi-demo:${{ github.sha }}
+            europe-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/fastapi-repo/fastapi-demo:latest
 
-  update-k8s-manifests:
+      - name: Scan Docker image for vulnerabilities
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: europe-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/fastapi-repo/fastapi-demo:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+  # 🚀 3. Deploy to Cloud Run
+  deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
-    permissions:
-      contents: write  # Needed for pushing changes
     steps:
       - uses: actions/checkout@v4
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0  # Needed for git push
-      
-      - name: Update image in Kubernetes manifest
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+      - name: Deploy to Cloud Run
         run: |
-          sed -i "s|REPLACE_OWNER|${{ github.repository_owner }}|g" kubernetes/deployment.yaml
-      
-      - name: Commit updated manifests
+          gcloud run deploy fastapi-demo \
+            --image=europe-west1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/fastapi-repo/fastapi-demo:${{ github.sha }} \
+            --region=europe-west1 \
+            --platform=managed \
+            --allow-unauthenticated \
+            --update-env-vars=COMMIT_SHA=${{ github.sha }}
+      - name: Smoke test new deployment
         run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git add kubernetes/deployment.yaml
-          git commit -m "Update image owner in deployment manifest [skip ci]" || echo "No changes to commit"
-          git push
+          SERVICE_URL=$(gcloud run services describe fastapi-demo --region=europe-west1 --format='value(status.url)')
+          echo "Testing service at $SERVICE_URL"
+          sleep 10
+          curl -f "$SERVICE_URL/healthz" || (echo "Smoke test failed, rolling back..." && exit 1)
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          PREV_REV=$(gcloud run revisions list --service fastapi-demo --region=europe-west1 --sort-by="~createTime" --format="value(metadata.name)" | sed -n 2p)
+          echo "Rolling back to $PREV_REV"
+          gcloud run services update-traffic fastapi-demo --region=europe-west1 --to-revisions $PREV_REV=100
