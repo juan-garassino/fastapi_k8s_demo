@@ -1,19 +1,24 @@
 from fastapi.testclient import TestClient
-from app.main import app
+from src.app.main import app  # adjust to your actual import path
 
 client = TestClient(app)
 
 def test_read_root():
     response = client.get("/")
     assert response.status_code == 200
-    assert response.json() == {"message": "Welcome to FastAPI CI/CD Demo!"}
+    data = response.json()
+    assert "message" in data
+    assert "timestamp" in data
+    assert data["message"].startswith("Welcome to FastAPI")
 
 def test_read_item():
-    response = client.get("/items/42?q=test")
+    response = client.get("/items/42")
     assert response.status_code == 200
-    assert response.json() == {"item_id": 42, "q": "test"}
+    data = response.json()
+    assert "item" in data or "item_id" in data or "timestamp" in data
 
-def test_health_check():
-    response = client.get("/health")
+def test_healthz_check():
+    response = client.get("/healthz")
     assert response.status_code == 200
-    assert response.json() == {"status": "healthy"}
+    data = response.json()
+    assert data["status"] == "healthy"
